@@ -3,7 +3,8 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                git 'https://github.com/MohamedMagdy840/jenkins-repo.git'  // Replace with your repository URL
+                git branch: 'main', url: 'https://github.com/MohamedMagdy840/jenkins-repo.git'
+  // Replace with your repository URL
             }
         }
         stage('Run Hello World') {
