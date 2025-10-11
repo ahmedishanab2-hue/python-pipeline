@@ -1,1 +1,1 @@
-echo "hello from jenkins"
+echo "hello from jenkins and docker"
