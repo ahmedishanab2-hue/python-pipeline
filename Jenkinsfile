@@ -1,22 +1,24 @@
 pipeline {
     agent any
+
     stages {
-        stage('Checkout') { 
-            steps { 
-                git branch: 'main', url: 'https://github.com/MohamedMagdy840/jenkins-repo.git'
-  // Replace with your repository URL
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/MohamedMagdy840/jenkins-repo.git',
+                    credentialsId: 'github'
             }
         }
+
         stage('Run Hello World') {
             steps {
-                script {
-                    sh 'ls -l'
-                    sh 'chmod +x hello.sh'  
-                    sh './hello.sh'          
-                }
-            } 
+                sh 'ls -l'
+                sh 'chmod +x hello.sh'
+                sh './hello.sh'
+            }
         }
-    }  
+    }
+
     post {
         success {
             echo 'Pipeline completed successfully!'
