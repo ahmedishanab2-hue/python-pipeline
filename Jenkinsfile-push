@@ -1,24 +1,43 @@
 pipeline {
     agent any
-    
+
     environment {
         APP_NAME = 'web-app'
-        REPO_URL ="https://github.com/MohamedMagdy840/jenkins-repo.git"
+        REPO_URL = 'https://github.com/MohamedMagdy840/jenkins-repo.git'
+    }
+
+    parameters {
+        string(
+            name: 'GIT_BRANCH',
+            defaultValue: 'main',
+            description: 'Git Branch'
+        )
     }
 
     stages {
+
         stage('Getting Repo files') {
             steps {
-                git branch: "${GIT_BRANCH}", credentialsId: 'github', url: "${REPO_URL}"
+                git branch: params.GIT_BRANCH,
+                    credentialsId: 'github',
+                    url: REPO_URL
             }
         }
 
         stage('Build Docker Image') {
             steps {
                 script {
-                  sh ""
-                    docker build -t ${APP_NAME}:${BUILD_NUMBER} .
-                   """
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'docker',
+                            usernameVariable: 'DOCKER_USERNAME',
+                            passwordVariable: 'DOCKER_PASSWORD'
+                        )
+                    ]) {
+                        sh """
+                            docker build -t ${DOCKER_USERNAME}/${APP_NAME}:${BUILD_NUMBER} .
+                        """
+                    }
                 }
             }
         }
@@ -26,14 +45,19 @@ pipeline {
         stage('Push Docker Image') {
             steps {
                 script {
-                    withCredentials([usernamePassword(credentialsId: 'docker', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
-                        
-                      sh """
-                         echo ${DOCKER_PASSWORD} | docker login -u ${DOCKER_USERNAME} --password-stdin
-                         docker push ${APP_NAME}}:${BUILD_NUMBER}
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'docker',
+                            usernameVariable: 'DOCKER_USERNAME',
+                            passwordVariable: 'DOCKER_PASSWORD'
+                        )
+                    ]) {
 
-                      """
-
+                        sh """
+                            echo \$DOCKER_PASSWORD | docker login -u \$DOCKER_USERNAME --password-stdin
+                            docker push \$DOCKER_USERNAME/${APP_NAME}:${BUILD_NUMBER}
+                            docker logout
+                        """
                     }
                 }
             }
@@ -42,11 +66,24 @@ pipeline {
         stage('Run Docker Container') {
             steps {
                 script {
-                    // Run Docker image with build number in container name
-                    sh """
-                        docker run --name "${APP_NAME}"-"${GIT_BRANCH}"-${BUILD_NUMBER} -d ${APP_NAME}:${BUILD_NUMBER}
-                        docker ps
-                    """
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'docker',
+                            usernameVariable: 'DOCKER_USERNAME',
+                            passwordVariable: 'DOCKER_PASSWORD'
+                        )
+                    ]) {
+
+                        sh """
+                            docker rm -f ${APP_NAME}-${params.GIT_BRANCH} || true
+
+                            docker run -d \
+                                --name ${APP_NAME}-${params.GIT_BRANCH} \
+                                \$DOCKER_USERNAME/${APP_NAME}:${BUILD_NUMBER}
+
+                            docker ps
+                        """
+                    }
                 }
             }
         }
