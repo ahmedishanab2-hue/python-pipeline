@@ -9,7 +9,7 @@ pipeline {
     stages {
         stage('Getting Repo files') {
             steps {
-                git branch: "${GIT_BRANCH}", credentialsId: 'github', url: "${REPO_URL}"
+                git branch: "main", credentialsId: 'github', url: "${REPO_URL}"
             }
         }
 
@@ -42,7 +42,7 @@ pipeline {
             steps {
                 script {
                     sh """
-                        docker run --name "${APP_NAME}"-"${GIT_BRANCH}"-${BUILD_NUMBER} -d ${APP_NAME}:${BUILD_NUMBER}
+                        docker run --name "${APP_NAME}"-"main"-${BUILD_NUMBER} -d ${APP_NAME}:${BUILD_NUMBER}
                         docker ps
                     """
                 }
