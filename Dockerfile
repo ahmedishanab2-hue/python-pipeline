@@ -1,14 +1,18 @@
-# Use the official Python base image
-FROM python:3.9-slim
+# Use an official lightweight Python image
+FROM python:3.12-slim
 
 # Set the working directory
 WORKDIR /app
 
-# Copy the Python script into the container
-COPY hello.py .
+# Copy dependency file and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Expose port 5000 for the Flask app
+# Copy the application code
+COPY . .
+
+# Expose Flask default port
 EXPOSE 5000
 
-# Run the Python script
+# Run the app
 CMD ["python", "hello.py"]
