@@ -1,111 +1,282 @@
-def pushToRegistry(String registry, String credsId) {
-    withCredentials([usernamePassword(
-        credentialsId: credsId,
-        usernameVariable: 'REG_USER',
-        passwordVariable: 'REG_PASS'
-    )]) {
-        withEnv(["REGISTRY=${registry}"]) {
-            sh '''#!/bin/bash
-                set +x
-                # registries require lowercase repo paths
-                USER_LC=$(echo "$REG_USER" | tr '[:upper:]' '[:lower:]')
-                TARGET="${REGISTRY}/${USER_LC}/${APP_NAME}:${IMAGE_TAG}"
-
-                echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
-                docker tag "${APP_NAME}:${IMAGE_TAG}" "$TARGET"
-                docker push "$TARGET"
-                docker logout "$REGISTRY"
-            '''
-        }
-    }
-}
 
 pipeline {
     agent any
 
     parameters {
-        string(name: 'APP_NAME', defaultValue: 'app-hello-nti', description: 'Application name (change for a new app)')
-        string(name: 'GIT_BRANCH_NAME', defaultValue: 'main', description: 'Branch to build')
-        string(name: 'REPO_URL', defaultValue: 'https://github.com/MohamedMagdy840/jenkins-repo.git', description: 'Git repo')
+        string(
+            name: 'GIT_BRANCH',
+            defaultValue: 'main',
+            description: 'Git branch to build and deploy'
+        )
+
+        string(
+            name: 'APP_NAME',
+            defaultValue: 'new-app-hello-nti',
+            description: 'Application and Docker image name'
+        )
+
+        string(
+            name: 'CONTAINER_PORT',
+            defaultValue: '5000',
+            description: 'Port used by the application inside the container'
+        )
+
+        string(
+            name: 'PORT_START',
+            defaultValue: '5000',
+            description: 'Start of host port range'
+        )
+
+        string(
+            name: 'PORT_END',
+            defaultValue: '5999',
+            description: 'End of host port range'
+        )
+
+        string(
+            name: 'REGISTRY3_HOST',
+            defaultValue: 'registry.example.com',
+            description: 'Third registry hostname'
+        )
+
+        string(
+            name: 'REGISTRY3_NAMESPACE',
+            defaultValue: 'my-team',
+            description: 'Namespace or project in the third registry'
+        )
     }
 
     environment {
-        APP_NAME  = "${params.APP_NAME}"
-        REPO_URL  = "${params.REPO_URL}"
-        APP_PORT  = '5000'            // port inside the container
-        PORT_MIN  = '5000'
-        PORT_MAX  = '5999'
+        REPO_URL = 'https://github.com/MohamedMagdy840/jenkins-repo.git'
+
+        // Jenkins credential IDs
+        DOCKER_CREDENTIALS = 'docker'
+        GHCR_CREDENTIALS = 'ghcr'
+        REGISTRY3_CREDENTIALS = 'registry3'
     }
 
     stages {
-        stage('Getting Repo files') {
+
+        stage('Getting Repo Files') {
             steps {
-                git branch: "${params.GIT_BRANCH_NAME}",
+                echo "Building branch: ${params.GIT_BRANCH}"
+
+                git branch: "${params.GIT_BRANCH}",
                     credentialsId: 'jenkins-token',
                     url: "${REPO_URL}"
+            }
+        }
 
+        stage('Prepare Application') {
+            steps {
                 script {
-                    // feature/login -> feature-login (valid for docker tags/names)
-                    env.BRANCH_SAFE = params.GIT_BRANCH_NAME
+                    // Make branch safe for Docker tags and container names
+                    env.SAFE_BRANCH = params.GIT_BRANCH
                         .replaceAll('[^a-zA-Z0-9_.-]', '-')
-                        .replaceAll('^[^a-zA-Z0-9]+', '')   // container names must start with a letter or digit
                         .toLowerCase()
-                    env.IMAGE_TAG      = "${env.BRANCH_SAFE}-${env.BUILD_NUMBER}"
-                    env.CONTAINER_NAME = "${env.BRANCH_SAFE}-${env.APP_NAME}"   // branch first, then app name
+
+                    env.IMAGE_TAG = "${env.SAFE_BRANCH}-${env.BUILD_NUMBER}"
+
+                    env.LOCAL_IMAGE =
+                        "${params.APP_NAME}:${env.IMAGE_TAG}"
+
+                    env.CONTAINER_NAME =
+                        "${params.APP_NAME}-${env.SAFE_BRANCH}-${env.BUILD_NUMBER}"
+
+                    echo "Application: ${params.APP_NAME}"
+                    echo "Branch tag: ${env.IMAGE_TAG}"
                 }
             }
         }
 
-        stage('Find Free Port') {
+        stage('Find Free Host Port') {
             steps {
                 script {
-                    env.HOST_PORT = sh(returnStdout: true, script: '''#!/bin/bash
-                        # shuffle the whole range, return the first port that is free
-                        for p in $(shuf -i ${PORT_MIN}-${PORT_MAX}); do
-                            in_os=$(ss -ltn | awk '{print $4}' | grep -E ":${p}$" || true)
-                            in_docker=$(docker ps --format '{{.Ports}}' | grep -E ":${p}->" || true)
-                            if [ -z "$in_os" ] && [ -z "$in_docker" ]; then
-                                echo $p
-                                exit 0
-                            fi
-                        done
-                        echo "No free port found" >&2
-                        exit 1
-                    ''').trim()
-                    echo "Selected free port: ${env.HOST_PORT}"
+                    env.APP_PORT = sh(
+                        script: '''
+                            python3 - "$PORT_START" "$PORT_END" <<'PY'
+import socket
+import random
+import sys
+
+start = int(sys.argv[1])
+end = int(sys.argv[2])
+
+if not (1024 <= start <= end <= 65535):
+    raise SystemExit("Invalid port range. Use ports 1024-65535.")
+
+free_ports = []
+
+for port in range(start, end + 1):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("0.0.0.0", port))
+        free_ports.append(port)
+    except OSError:
+        pass
+    finally:
+        sock.close()
+
+if not free_ports:
+    raise SystemExit("No free ports found in the requested range.")
+
+print(random.choice(free_ports))
+PY
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Selected host port: ${env.APP_PORT}"
                 }
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh 'docker build -t ${APP_NAME}:${IMAGE_TAG} .'
+                sh '''
+                    set -eu
+
+                    docker build \
+                        -t "$LOCAL_IMAGE" \
+                        .
+                '''
+            }
+        }
+
+        stage('Tag Image for 3 Registries') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    ),
+                    usernamePassword(
+                        credentialsId: 'ghcr',
+                        usernameVariable: 'GHCR_USER',
+                        passwordVariable: 'GHCR_PASS'
+                    ),
+                    usernamePassword(
+                        credentialsId: 'registry3',
+                        usernameVariable: 'REGISTRY3_USER',
+                        passwordVariable: 'REGISTRY3_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        docker tag "$LOCAL_IMAGE" \
+                            "$DOCKER_USER/$APP_NAME:$IMAGE_TAG"
+
+                        docker tag "$LOCAL_IMAGE" \
+                            "ghcr.io/$GHCR_USER/$APP_NAME:$IMAGE_TAG"
+
+                        docker tag "$LOCAL_IMAGE" \
+                            "$REGISTRY3_HOST/$REGISTRY3_NAMESPACE/$APP_NAME:$IMAGE_TAG"
+
+                        echo "Image tagged for all three registries."
+                    '''
+                }
             }
         }
 
         stage('Push to Docker Hub') {
-            steps { script { pushToRegistry('docker.io', 'docker') } }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        echo "$DOCKER_PASS" | docker login \
+                            -u "$DOCKER_USER" \
+                            --password-stdin
+
+                        docker push \
+                            "$DOCKER_USER/$APP_NAME:$IMAGE_TAG"
+
+                        docker logout || true
+                    '''
+                }
+            }
         }
 
-        stage('Push to GHCR (GitHub)') {
-            steps { script { pushToRegistry('ghcr.io', 'ghcr-creds') } }
+        stage('Push to GitHub Container Registry') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'ghcr',
+                        usernameVariable: 'GHCR_USER',
+                        passwordVariable: 'GHCR_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        echo "$GHCR_PASS" | docker login ghcr.io \
+                            -u "$GHCR_USER" \
+                            --password-stdin
+
+                        docker push \
+                            "ghcr.io/$GHCR_USER/$APP_NAME:$IMAGE_TAG"
+
+                        docker logout ghcr.io || true
+                    '''
+                }
+            }
         }
 
-        stage('Push to Quay.io') {
-            steps { script { pushToRegistry('quay.io', 'quay-creds') } }
+        stage('Push to Third Registry') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'registry3',
+                        usernameVariable: 'REGISTRY3_USER',
+                        passwordVariable: 'REGISTRY3_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        echo "$REGISTRY3_PASS" | docker login \
+                            "$REGISTRY3_HOST" \
+                            -u "$REGISTRY3_USER" \
+                            --password-stdin
+
+                        docker push \
+                            "$REGISTRY3_HOST/$REGISTRY3_NAMESPACE/$APP_NAME:$IMAGE_TAG"
+
+                        docker logout "$REGISTRY3_HOST" || true
+                    '''
+                }
+            }
         }
 
-        stage('Run Docker Container') {
+        stage('Run New Docker Container') {
             steps {
                 sh '''
-                    docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
+                    set -eu
+
+                    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
                     docker run -d \
-                        -p "${HOST_PORT}:${APP_PORT}" \
-                        --name "${CONTAINER_NAME}" \
-                        "${APP_NAME}:${IMAGE_TAG}"
+                        --restart unless-stopped \
+                        -p "$APP_PORT:$CONTAINER_PORT" \
+                        --name "$CONTAINER_NAME" \
+                        "$LOCAL_IMAGE"
 
-                    docker ps --filter "name=${CONTAINER_NAME}"
+                    echo "Container status:"
+                    docker ps --filter "name=$CONTAINER_NAME"
+
+                    echo "Application URL:"
+                    echo "http://localhost:$APP_PORT"
                 '''
             }
         }
@@ -113,10 +284,27 @@ pipeline {
 
     post {
         success {
-            echo "Branch '${params.GIT_BRANCH_NAME}' pushed to 3 registries, container '${env.CONTAINER_NAME}' running at http://<server>:${env.HOST_PORT}"
+            echo """
+            Pipeline completed successfully!
+
+            Branch: ${params.GIT_BRANCH}
+            Application: ${params.APP_NAME}
+            Image tag: ${env.IMAGE_TAG}
+            Host port: ${env.APP_PORT}
+
+            Registries:
+            - Docker Hub
+            - GitHub Container Registry
+            - ${params.REGISTRY3_HOST}
+            """
         }
+
         failure {
-            echo "Pipeline failed"
+            echo 'Pipeline failed. Check the failed stage in the Jenkins console.'
+        }
+
+        always {
+            echo 'Pipeline execution finished.'
         }
     }
 }
